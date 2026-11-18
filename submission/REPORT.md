@@ -35,7 +35,7 @@ TODO(học viên): (a) quyết định cuối; nếu Hold/Rework cần làm gì 
 
 ### (Thưởng +2) CVAT: lọc box nhỏ `width < 20`
 
-**Thiết lập.** CVAT tự host (`localhost:8080`), project `AutoQC-Pipeline` tạo từ `cvat/labels.json` (4 nhãn `car, person, truck, bus` đúng thứ tự id, thuộc tính `can_review`). Task `day09-cvat-filter-top20-queue` gồm **20 ảnh đầu `05_review_queue.csv`**, lấy từ `work/run/ds/images/` sau khi chạy `python -m pipeline.run --no-review`: nhãn ở trạng thái **sau autofix, trước người duyệt** (nếu chạy đủ, `human_review_sim` đã chép nhãn tham chiếu đè lên 80 ảnh đầu hàng đợi). Nhãn import dạng YOLO 1.1: **111 box** = đúng tổng số dòng nhãn của 20 ảnh; 4 ảnh `NEEDS_LABEL` (img_0031, img_0053, img_0126, img_0135) không có box.
+**Thiết lập.** CVAT tự host (`localhost:8080`), project `AutoQC-Pipeline` tạo từ `cvat/labels.json` (4 nhãn `car, person, truck, bus` đúng thứ tự id, thuộc tính `can_review`). Task `day09-cvat-filter-top20-queue` gồm **20 ảnh đầu `05_review_queue.csv`**, lấy từ `work/run/ds/images/` sau khi chạy `python -m pipeline.run --no-review` **với ngưỡng khởi đầu** (`phash_dist=2`, `conf=0.25`, trước Bước 3; sau calibrate, top-20 hàng đợi mới trùng 11/20 ảnh với tập này): nhãn ở trạng thái **sau autofix, trước người duyệt** (nếu chạy đủ, `human_review_sim` đã chép nhãn tham chiếu đè lên 80 ảnh đầu hàng đợi). Nhãn import dạng YOLO 1.1: **111 box** = đúng tổng số dòng nhãn của 20 ảnh; 4 ảnh `NEEDS_LABEL` (img_0031, img_0053, img_0126, img_0135) không có box.
 
 **Lọc** trong màn hình job: *Filters → Objects → Add rule → `Width < 20`* (nút Not tắt) → Submit. Kết quả: **10 box / 4 ảnh** (chi tiết: `work/cvat/cvat_filter_width_lt20.csv`).
 
