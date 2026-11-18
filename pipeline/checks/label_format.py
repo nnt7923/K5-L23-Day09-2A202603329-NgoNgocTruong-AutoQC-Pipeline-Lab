@@ -23,7 +23,65 @@ Gợi ý
 """
 from ..common import ERROR, WARN, Issue, iou_xywh, parse_yolo_line  # noqa: F401
 
+NAME = "label_format"
+
+
+def _edges(cx, cy, w, h):
+    return cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
+
 
 def run(ds, cfg):
-    # TODO: duyệt từng file nhãn, từng dòng
-    raise NotImplementedError("check label_format chưa làm")
+    lf = cfg["label_format"]
+    tol, min_px = lf["overflow_tol"], lf["min_box_px"]
+    max_frac, dup_iou = lf["max_box_frac"], lf["dup_box_iou"]
+    n_cls = len(ds.classes)
+    issues = []
+
+    for lp in ds.label_files():
+        stem = lp.stem
+        lines = ds.read_label_lines(stem) or []
+        size = ds.image_size(stem) if ds.image_path(stem) else None
+        seen = []                                   # (line_no, box) các dòng hợp lệ trước đó
+
+        for no, text in lines:
+            # 1) cú pháp
+            try:
+                c, cx, cy, w, h = parse_yolo_line(text)
+            except ValueError as e:
+                issues.append(Issue(NAME, ERROR, "BAD_FORMAT", stem, f"dòng không đúng 5 cột số: {e}", no,
+                                    {"text": text.strip()[:80]}))
+                continue
+            # 2) id lớp
+            if not 0 <= c < n_cls:
+                issues.append(Issue(NAME, ERROR, "BAD_CLASS_ID", stem, f"id lớp {c} ngoài 0..{n_cls - 1}", no, {"class_id": c}))
+                continue
+            # 3) kích thước
+            if w <= 0 or h <= 0:
+                issues.append(Issue(NAME, ERROR, "BOX_ZERO", stem, f"box rộng/cao <= 0 (w={w}, h={h})", no))
+                continue
+            # 4) tràn ảnh
+            x1, y1, x2, y2 = _edges(cx, cy, w, h)
+            overflow = max(0.0 - x1, 0.0 - y1, x2 - 1.0, y2 - 1.0, 0.0)
+            if overflow > tol:
+                issues.append(Issue(NAME, ERROR, "BOX_OUT_OF_IMAGE", stem, f"box tràn ảnh {overflow:.4f}", no,
+                                    {"overflow": round(overflow, 6)}))
+            # 5) box lặp (cùng lớp với dòng TRƯỚC, IoU > ngưỡng) -> báo ở dòng sau
+            box = (cx, cy, w, h)
+            for prev_no, (pc, pbox) in seen:
+                if pc == c:
+                    iou = iou_xywh(box, pbox)
+                    if iou > dup_iou:
+                        issues.append(Issue(NAME, ERROR, "DUP_BOX", stem, f"trùng box dòng {prev_no} (IoU {iou:.2f})", no,
+                                            {"dup_of": prev_no, "iou": round(iou, 4)}))
+                        break
+            seen.append((no, (c, box)))
+            # 6) cảnh báo kích thước
+            if size:
+                W, H = size
+                short = min(w * W, h * H)
+                if short < min_px:
+                    issues.append(Issue(NAME, WARN, "BOX_TINY", stem, f"cạnh ngắn {short:.1f}px < {min_px}px", no,
+                                        {"short_px": round(short, 2)}))
+            if w * h > max_frac:
+                issues.append(Issue(NAME, WARN, "BOX_HUGE", stem, f"box phủ {w * h:.0%} ảnh", no, {"area_frac": round(w * h, 4)}))
+    return issues

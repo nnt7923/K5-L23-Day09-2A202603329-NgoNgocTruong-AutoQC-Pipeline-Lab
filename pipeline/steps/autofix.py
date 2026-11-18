@@ -33,7 +33,117 @@ import yaml  # noqa: F401
 
 from ..common import ERROR, parse_yolo_line  # noqa: F401
 
+DROP_CODES = {"BAD_FORMAT", "BAD_CLASS_ID", "BOX_ZERO", "DUP_BOX"}
+CLIP_CODES = {"BOX_OUT_OF_IMAGE"}
+REMOVE_CODES = {"DUP_IMAGE_EXACT", "DUP_IMAGE_NEAR", "LEAK_TEST", "CORRUPT_IMAGE", "BAD_SIZE"}
+
+
+def _fmt(v):
+    return f"{v:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+def _clip(text):
+    """Cắt box về [0,1]. Trả dòng mới, hoặc None nếu box không còn diện tích / không parse được."""
+    try:
+        c, cx, cy, w, h = parse_yolo_line(text)
+    except ValueError:
+        return None
+    x1, y1 = max(0.0, cx - w / 2), max(0.0, cy - h / 2)
+    x2, y2 = min(1.0, cx + w / 2), min(1.0, cy + h / 2)
+    nw, nh = x2 - x1, y2 - y1
+    if nw <= 1e-9 or nh <= 1e-9:
+        return None
+    return " ".join([str(c), _fmt((x1 + x2) / 2), _fmt((y1 + y2) / 2), _fmt(nw), _fmt(nh)])
+
+
+def _remove_image(ds, stem):
+    """Xoá ảnh + nhãn khỏi ds. Trả True nếu thực sự xoá được gì đó."""
+    done = False
+    img = ds.image_path(stem)
+    if img is not None and img.exists():
+        img.unlink()
+        done = True
+    lab = ds.label_path(stem)
+    if lab.exists():
+        lab.unlink()
+        done = True
+    return done
+
+
+def _rename_classes(ds, cfg):
+    old = ds.yaml_names()
+    want = {i: n for i, n in enumerate(cfg["classes"])}
+    if old == want:
+        return None
+    d = {}
+    if ds.yaml_path.exists():
+        d = yaml.safe_load(ds.yaml_path.read_text(encoding="utf-8")) or {}
+    d["names"] = want
+    d["nc"] = len(want)
+    ds.yaml_path.write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return {"image": "data.yaml", "line": None, "action": "rename_classes",
+            "before": str([old[k] for k in sorted(old)]), "after": str(cfg["classes"])}
+
 
 def fix(ds, issues, cfg):
-    # TODO
-    raise NotImplementedError("autofix chưa làm")
+    errors = [i for i in issues if i.severity == ERROR]
+    fixes = []
+
+    # 1) Ảnh phải loại bỏ (làm trước: các issue dòng của ảnh đó sẽ bị bỏ qua)
+    removed = set()
+    for i in errors:
+        if i.code in REMOVE_CODES and i.image not in removed:
+            removed.add(i.image)
+            if _remove_image(ds, i.image):
+                fixes.append({"image": i.image, "line": None, "action": "remove_image",
+                              "before": i.code, "after": "đã xoá ảnh + nhãn"})
+
+    # 2) data.yaml
+    if any(i.code == "BAD_CLASS_NAME" for i in errors):
+        f = _rename_classes(ds, cfg)
+        if f:
+            fixes.append(f)
+
+    # 3) Ảnh thiếu nhãn: KHÔNG bịa nhãn, chuyển người gán
+    flagged = set()
+    for i in errors:
+        if i.code == "MISSING_LABEL_FILE" and i.image not in removed and i.image not in flagged:
+            flagged.add(i.image)
+            if ds.image_path(i.image) is not None and not ds.label_path(i.image).exists():
+                fixes.append({"image": i.image, "line": None, "action": "needs_label",
+                              "before": "(không có file)", "after": "chuyển người gán"})
+
+    # 4) Lỗi theo dòng: gom theo file, ghi lại MỘT lần (số dòng là số GỐC)
+    per_file = defaultdict(lambda: defaultdict(set))          # stem -> line -> {codes}
+    for i in errors:
+        if i.line is not None and (i.code in DROP_CODES or i.code in CLIP_CODES) and i.image not in removed:
+            per_file[i.image][int(i.line)].add(i.code)
+
+    for stem in sorted(per_file):
+        lp = ds.label_path(stem)
+        if not lp.exists():
+            continue
+        raw = lp.read_text(encoding="utf-8", errors="replace").splitlines()
+        out, changed = [], False
+        for no, text in enumerate(raw, 1):
+            codes = per_file[stem].get(no)
+            if not codes or not text.strip():
+                out.append(text)
+                continue
+            if codes & DROP_CODES:                                 # xoá dòng thắng, không clip thêm
+                fixes.append({"image": stem, "line": no, "action": "drop_line", "before": text, "after": ""})
+                changed = True
+                continue
+            new = _clip(text)
+            if new is None:                                       # cắt xong không còn diện tích -> xoá
+                fixes.append({"image": stem, "line": no, "action": "drop_line", "before": text, "after": ""})
+                changed = True
+            elif new != text:
+                fixes.append({"image": stem, "line": no, "action": "clip_box", "before": text, "after": new})
+                out.append(new)
+                changed = True
+            else:
+                out.append(text)
+        if changed:
+            lp.write_text("".join(l + "\n" for l in out), encoding="utf-8")
+    return fixes
